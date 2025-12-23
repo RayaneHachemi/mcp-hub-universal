@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 app.use(cors());
 app.use(express.json());
@@ -37,4 +37,9 @@ app.post('/mcp', (req, res) => {
   res.json({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found' } });
 });
 
-app.listen(PORT, () => console.log('MCP Hub running on port ' + PORT));
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log('Server is listening on port ' + PORT);
+});
+
+server.keepAliveTimeout = 120000;
+server.headersTimeout = 120000;
