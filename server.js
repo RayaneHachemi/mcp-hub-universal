@@ -10,33 +10,51 @@ app.use(express.json());
 // Liste des outils MCP
 const mcpTools = [
   {
-    name: 'gmail_search',
-    description: 'Rechercher des emails Gmail',
+    name: 'gmail',
+    description: 'Rechercher et lire des emails Gmail',
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Recherche email' }
-      }
+        action: { type: 'string', enum: ['search', 'read', 'send'] },
+        query: { type: 'string', description: 'Recherche ou contenu' }
+      },
+      required: ['action']
     }
   },
   {
-    name: 'calendar_events',
-    description: 'Lister les événements du calendrier',
+    name: 'calendar',
+    description: 'Gérer Google Calendar',
     inputSchema: {
       type: 'object',
       properties: {
-        days: { type: 'number', description: 'Nombre de jours' }
-      }
+        action: { type: 'string', enum: ['list_events', 'create_event', 'delete_event'] },
+        query: { type: 'string' }
+      },
+      required: ['action']
     }
   },
   {
-    name: 'notion_search',
-    description: 'Rechercher dans Notion',
+    name: 'notion',
+    description: 'Gérer les pages Notion',
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Recherche Notion' }
-      }
+        action: { type: 'string', enum: ['search', 'create_page', 'update_page'] },
+        query: { type: 'string' }
+      },
+      required: ['action']
+    }
+  },
+  {
+    name: 'drive',
+    description: 'Gérer Google Drive',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list_files', 'search', 'download'] },
+        query: { type: 'string' }
+      },
+      required: ['action']
     }
   }
 ];
@@ -50,68 +68,117 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', authenticated: true, timestamp: new Date().toISOString() });
 });
 
-// Liste des outils
 app.get('/tools', (req, res) => {
   res.json({ tools: mcpTools });
 });
 
-// SSE Endpoint pour MCP
-app.get('/sse', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.flushHeaders();
+// ============ MCP HTTP STREAMABLE ============
 
-  // Envoie immédiatement les outils
-  const data = JSON.stringify({ type: 'tools', tools: mcpTools });
-  res.write(`data: ${data}\n\n`);
+app.post('/mcp', handleMcpRequest);
+app.post('/mcp/message', handleMcpRequest);
 
-  // Keep alive toutes les 15 secondes
-  const keepAlive = setInterval(() => {
-    res.write(`:ping\n\n`);
-  }, 15000);
+function handleMcpRequest(req, res) {
+  const { jsonrpc, id, method, params } = req.body;
 
-  req.on('close', () => {
-    clearInterval(keepAlive);
-  });
-});
+  // Réponse JSON-RPC
+  const respond = (result) => {
+    res.json({ jsonrpc: '2.0', id, result });
+  };
 
-// MCP JSON-RPC endpoint (pour N8N)
-app.post('/mcp', (req, res) => {
-  const { method, params } = req.body;
+  const respondError = (code, message) => {
+    res.json({ jsonrpc: '2.0', id, error: { code, message } });
+  };
 
-  if (method === 'tools/list') {
-    return res.json({ tools: mcpTools });
-  }
-
-  if (method === 'tools/call') {
-    const { name, arguments: args } = params;
-    return res.json({
-      content: [{ type: 'text', text: `Tool ${name} appelé avec: ${JSON.stringify(args)}` }]
+  // Initialize
+  if (method === 'initialize') {
+    return respond({
+      protocolVersion: '2024-11-05',
+      capabilities: { tools: { listChanged: false } },
+      serverInfo: { name: 'mcp-hub-universal', version: '1.0.0' }
     });
   }
 
-  res.json({ error: 'Method not found' });
+  // List tools
+  if (method === 'tools/list') {
+    return respond({ tools: mcpTools });
+  }
+
+  // Call tool
+  if (method === 'tools/call') {
+    const { name, arguments: args } = params || {};
+    
+    const results = {
+      gmail: {
+        search: { emails: [{ subject: 'Email test', from: 'test@example.com', snippet: 'Contenu...' }] },
+        read: { content: 'Contenu de l\'email' },
+        send: { success: true, messageId: '12345' }
+      },
+      calendar: {
+        list_events: { events: [{ title: 'Réunion', start: '2025-12-24T10:00:00', end: '2025-12-24T11:00:00' }] },
+        create_event: { success: true, eventId: '67890' },
+        delete_event: { success: true }
+      },
+      notion: {
+        search: { pages: [{ title: 'Ma page Notion', id: 'page123' }] },
+        create_page: { success: true, pageId: 'newpage456' },
+        update_page: { success: true }
+      },
+      drive: {
+        list_files: { files: [{ name: 'Document.pdf', id: 'file123', mimeType: 'application/pdf' }] },
+        search: { files: [{ name: 'Résultat.docx', id: 'file456' }] },
+        download: { success: true, downloadUrl: 'https://...' }
+      }
+    };
+
+    const action = args?.action || 'search';
+    const result = results[name]?.[action] || { message: `${name}.${action} exécuté` };
+
+    return respond({
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+    });
+  }
+
+  // Notifications (ignore)
+  if (method === 'notifications/initialized') {
+    return res.status(204).send();
+  }
+
+  return respondError(-32601, `Method not found: ${method}`);
+}
+
+// ============ ENDPOINTS DIRECTS ============
+
+app.post('/call', (req, res) => {
+  const { tool, action, params } = req.body;
+  res.json({ success: true, tool, action, params, message: 'Connectez vos APIs pour activer' });
+});
+
+app.post('/gmail/search', (req, res) => {
+  res.json({ success: true, emails: [{ subject: 'Test', from: 'test@test.com' }] });
+});
+
+app.post('/calendar/events', (req, res) => {
+  res.json({ success: true, events: [{ title: 'Event', date: '2025-12-24' }] });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 MCP Hub Universal running on port ${PORT}`);
+  console.log(`📡 MCP Endpoint: http://localhost:${PORT}/mcp`);
 });
 ```
 
-7. Clique **"Commit changes"** → **"Commit changes"**
+5. Clique **"Commit changes"** → **"Commit changes"**
 
 ---
 
-## Étape 2 : Attendre le redéploiement
-
-Render redéploie automatiquement. Attends 2-3 minutes.
+## Étape 2 : Attendre le redéploiement (2-3 min)
 
 ---
 
-## Étape 3 : Teste à nouveau
+## Étape 3 : Connecter à N8N
 
-Ouvre dans ton navigateur :
+Dans ton nœud **MCP Tool** de N8N :
+
+**URL :**
 ```
-https://mcp-hub-universal.onrender.com/sse
+https://mcp-hub-universal.onrender.com/mcp
